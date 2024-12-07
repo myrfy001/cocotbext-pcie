@@ -52,14 +52,49 @@ class BaseBus(Bus):
 
 
 class RTileTxBus(BaseBus):
-    _signals = ["data", "hdr", "sop",
-                "eop", "dvalid", "hvalid", "ready"]
+    _signals = [
+        # data transfer
+        "data",
+        "hdr",
+        "sop",
+        "eop",
+        "dvalid",
+        "hvalid",
+        "ready",
+        # flow control
+        "hcrdt_update",
+        "hcrdt_update_cnt",
+        "hcrdt_init",
+        "hcrdt_init_ack",
+        "dcrdt_update",
+        "dcrdt_update_cnt",
+        "dcrdt_init",
+        "dcrdt_init_ack",
+    ]
     _optional_signals = ["data_par", "hdr_par", "prefix_par"]
 
 
 class RTileRxBus(BaseBus):
-    _signals = ["data", "hdr", "sop", "eop", "dvalid",
-                "hvalid", "ready", "empty", "bar"]
+    _signals = [
+        "data",
+        "hdr",
+        "sop",
+        "eop",
+        "dvalid",
+        "hvalid",
+        "ready",
+        "empty",
+        "bar",
+        # flow control
+        "hcrdt_update",
+        "hcrdt_update_cnt",
+        "hcrdt_init",
+        "hcrdt_init_ack",
+        "dcrdt_update",
+        "dcrdt_update_cnt",
+        "dcrdt_init",
+        "dcrdt_init_ack",
+    ]
     _optional_signals = ["data_par", "hdr_par",
                          "prefix_par", "vfactive", "vfnum", "pfnum"]
 
@@ -203,7 +238,7 @@ class RTilePcieTransaction:
         super().__init__(*args, **kwargs)
 
     def __repr__(self):
-        return f"{type(self).__name__}({', '.join(f'{s}={int(getattr(self, s))}' for s in self.__slots__)})"
+        return f"{type(self).__name__}({', '.join(f'{s}={hex(getattr(self, s))}' for s in self.__slots__)})"
 
 
 class RTilePcieBase:
@@ -398,7 +433,7 @@ class RTilePcieSource(RTilePcieBase):
             self.dequeue_event.clear()
             await self.dequeue_event.wait()
         frame = RTilePcieFrame(frame)
-        print("source send ======= frame=", frame)
+        self.log.debug("rtile pcie source frame= %r", frame)
         await self.queue.put(frame)
         self.idle_event.clear()
         self.queue_occupancy_bytes += len(frame)
@@ -472,7 +507,7 @@ class RTilePcieSource(RTilePcieBase):
         while True:
             frame = await self._get_frame()
             frame_offset = 0
-            self.log.info("TX frame: %r", frame)
+            self.log.debug("TX frame: %r", frame)
             first = True
 
             while frame is not None:
@@ -483,7 +518,7 @@ class RTilePcieSource(RTilePcieBase):
                         if not self.empty():
                             frame = self._get_frame_nowait()
                             frame_offset = 0
-                            self.log.info("TX frame: %r", frame)
+                            self.log.debug("TX frame: %r", frame)
                             first = True
                         else:
                             break
@@ -650,6 +685,8 @@ class RTilePcieSink(RTilePcieBase):
             sample = self.sample_obj
             self.sample_obj = None
 
+            self.log.info("RX sample: %r", sample)
+
             global_valid = sample.hvalid | sample.dvalid
             for seg in range(self.seg_count):
                 if not global_valid & (1 << seg):
@@ -681,7 +718,6 @@ class RTilePcieSink(RTilePcieBase):
                         frame.vfnum = (sample.vfnum >> seg*11) & 0x7ff
                     frame.err = (sample.err >> seg) & 0x1
 
-                print("aaa===== sample=", sample)
                 assert frame is not None, "framing error: data transferred outside of frame"
 
                 if dword_count > 0:

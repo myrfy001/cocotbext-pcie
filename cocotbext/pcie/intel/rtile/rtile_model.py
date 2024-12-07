@@ -25,7 +25,7 @@ THE SOFTWARE.
 import cocotb
 from cocotb.clock import Clock
 from cocotb.queue import Queue
-from cocotb.triggers import RisingEdge, FallingEdge, Timer, First
+from cocotb.triggers import Event, RisingEdge, FallingEdge, Timer, First
 
 from cocotbext.pcie.core import Device, Endpoint, __version__
 from cocotbext.pcie.core.caps import MsiCapability, MsixCapability
@@ -182,14 +182,6 @@ class RTilePcieDevice(Device):
                  tx_bus=None,
                  tx_par_err=None,
 
-                 # RX flow control
-                 rx_buffer_limit=None,
-                 rx_buffer_limit_tdm_idx=None,
-
-                 # TX flow control
-                 tx_cdts_limit=None,
-                 tx_cdts_limit_tdm_idx=None,
-
                  # Power management and hard IP status interface
                  link_up=None,
                  dl_up=None,
@@ -332,16 +324,18 @@ class RTilePcieDevice(Device):
         self.rx_queue = Queue()
 
         if port_num == 0:
-            # UG lists 1144 CPLH and 1444 "256 bit" CPLD
-            # Tests confirm >=1024 CPLH and >=2888 CPLD
-            self.rx_buf_cplh_fc_limit = 1144
-            self.rx_buf_cpld_fc_limit = 1444 * 2
+            # UG lists 1444 CPLH and 2016 "512 bit" CPLD
+            self.rx_buf_cplh_fc_limit = 1444
+            self.rx_buf_cpld_fc_limit = 2016 * 4
         elif port_num == 1:
+            self.rx_buf_cplh_fc_limit = 1144
+            self.rx_buf_cpld_fc_limit = 2016 * 2
+        elif port_num == 2:
             self.rx_buf_cplh_fc_limit = 572
-            self.rx_buf_cpld_fc_limit = 1444
+            self.rx_buf_cpld_fc_limit = 2016
         else:
-            self.rx_buf_cplh_fc_limit = 286
-            self.rx_buf_cpld_fc_limit = 1444 // 2
+            self.rx_buf_cplh_fc_limit = 572
+            self.rx_buf_cpld_fc_limit = 2016
 
         self.rx_buf_cplh_fc_count = 0
         self.rx_buf_cpld_fc_count = 0
@@ -417,14 +411,6 @@ class RTilePcieDevice(Device):
             self.tx_sink.queue_occupancy_limit_frames = 2
             self.tx_sink.ready_latency = 3
             self.dw = self.tx_sink.width
-
-        # RX flow control
-        self.rx_buffer_limit = init_signal(rx_buffer_limit, 12)
-        self.rx_buffer_limit_tdm_idx = init_signal(rx_buffer_limit_tdm_idx, 2)
-
-        # TX flow control
-        self.tx_cdts_limit = init_signal(tx_cdts_limit, 16, 0)
-        self.tx_cdts_limit_tdm_idx = init_signal(tx_cdts_limit_tdm_idx, 3, 0)
 
         # Power management and hard IP status interface
         self.link_up = init_signal(link_up, 1, 0)
@@ -780,6 +766,12 @@ class RTilePcieDevice(Device):
                 self.max_payload_size//128-1).bit_length()
             f.pcie_cap.extended_tag_supported = self.enable_extended_tag
 
+        self.user_logic_side_fc_handler = FlowControlHandler(
+            self.upstream_port.fc_state[0],
+            tx_bus,
+            rx_bus
+        )
+
         # fork coroutines
 
         if self.coreclkout_hip is not None:
@@ -790,8 +782,6 @@ class RTilePcieDevice(Device):
             cocotb.start_soon(self._run_rx_logic())
         if self.tx_sink:
             cocotb.start_soon(self._run_tx_logic())
-        if self.tx_cdts_limit:
-            cocotb.start_soon(self._run_tx_fc_logic())
         if self.tl_cfg_ctl:
             cocotb.start_soon(self._run_cfg_out_logic())
 
@@ -844,9 +834,7 @@ class RTilePcieDevice(Device):
                     else:
                         self.log.warning("No space in RX completion buffer, dropping TLP: CPLH %d (limit %d), CPLD %d (limit %d)",
                                          self.rx_buf_cplh_fc_count, self.rx_buf_cplh_fc_limit, self.rx_buf_cpld_fc_count, self.rx_buf_cpld_fc_limit)
-
-                    tlp.release_fc()
-
+                        tlp.release_fc()
                     return
 
             tlp.release_fc()
@@ -868,8 +856,6 @@ class RTilePcieDevice(Device):
 
                     await self.rx_queue.put((tlp, frame))
 
-                    tlp.release_fc()
-
                     return
 
             tlp.release_fc()
@@ -889,8 +875,6 @@ class RTilePcieDevice(Device):
                     frame.pfnum = tlp.requester_id.function
 
                     await self.rx_queue.put((tlp, frame))
-
-                    tlp.release_fc()
 
                     return
 
@@ -947,8 +931,18 @@ class RTilePcieDevice(Device):
     async def _run_rx_logic(self):
         while True:
             tlp, frame = await self.rx_queue.get()
+
+            # block if there is congestion between rtile and user logic
+            await self.user_logic_side_fc_handler.wait_until_rx_source_has_enough_credits(tlp)
+
+            # following line will update credits for flow control between rtile and pcie link partener
+            tlp.release_fc()
+            # following line will update credits for flow control between rtile and user logic
+            self.user_logic_side_fc_handler.consume_rx_source_credits(tlp)
+
             await self.rx_source.send(frame)
 
+            # this is used for checking the overflow of hard ip core's internal cplt buffer
             self.rx_buf_cplh_fc_count = max(self.rx_buf_cplh_fc_count-1, 0)
             self.rx_buf_cpld_fc_count = max(
                 self.rx_buf_cpld_fc_count-tlp.get_data_credits(), 0)
@@ -958,41 +952,7 @@ class RTilePcieDevice(Device):
             frame = await self.tx_sink.recv()
             tlp = frame.to_tlp()
             await self.send(tlp)
-
-    async def _run_rx_fc_logic(self):
-        pass
-
-        # RX flow control
-        # rx_buffer_limit
-        # rx_buffer_limit_tdm_idx
-
-    async def _run_tx_fc_logic(self):
-        clock_edge_event = RisingEdge(self.coreclkout_hip)
-
-        while True:
-            self.tx_cdts_limit.value = self.upstream_port.fc_state[0].ph.tx_credit_limit & 0xfff
-            self.tx_cdts_limit_tdm_idx.value = 0
-            await clock_edge_event
-
-            self.tx_cdts_limit.value = self.upstream_port.fc_state[0].nph.tx_credit_limit & 0xfff
-            self.tx_cdts_limit_tdm_idx.value = 1
-            await clock_edge_event
-
-            self.tx_cdts_limit.value = self.upstream_port.fc_state[0].cplh.tx_credit_limit & 0xfff
-            self.tx_cdts_limit_tdm_idx.value = 2
-            await clock_edge_event
-
-            self.tx_cdts_limit.value = self.upstream_port.fc_state[0].pd.tx_credit_limit & 0xffff
-            self.tx_cdts_limit_tdm_idx.value = 4
-            await clock_edge_event
-
-            self.tx_cdts_limit.value = self.upstream_port.fc_state[0].npd.tx_credit_limit & 0xffff
-            self.tx_cdts_limit_tdm_idx.value = 5
-            await clock_edge_event
-
-            self.tx_cdts_limit.value = self.upstream_port.fc_state[0].cpld.tx_credit_limit & 0xffff
-            self.tx_cdts_limit_tdm_idx.value = 6
-            await clock_edge_event
+            self.user_logic_side_fc_handler.release_tx_sink_credits(tlp)
 
     async def _run_pm_status_logic(self):
         pass
@@ -1331,3 +1291,254 @@ class RTilePcieDevice(Device):
     # virtio_pcicfg_rdack
     # virtio_pcicfg_rdbe
     # virtio_pcicfg_data
+
+
+class FlowControlHandler:
+    def __init__(self, fc_channel_state, clk, tx_bus, rx_bus):
+        self.fc_channel_state = fc_channel_state
+        self.tx_bus = tx_bus
+        self.rx_bus = rx_bus
+
+        self.ph_sink = HeaderFlowControlSinkHandler(
+            clk, tx_bus.hcrdt_update[0], tx_bus.hcrdt_update_cnt[0:1], tx_bus.hcrdt_init[0], tx_bus.hcrdt_init_ack[0])
+        self.nph_sink = HeaderFlowControlSinkHandler(
+            clk, tx_bus.hcrdt_update[1], tx_bus.hcrdt_update_cnt[2:3], tx_bus.hcrdt_init[1], tx_bus.hcrdt_init_ack[1])
+        self.cplh_sink = HeaderFlowControlSinkHandler(
+            clk, tx_bus.hcrdt_update[2], tx_bus.hcrdt_update_cnt[4:5], tx_bus.hcrdt_init[2], tx_bus.hcrdt_init_ack[2])
+        self.pd_sink = DataFlowControlSinkHandler(
+            clk, tx_bus.dcrdt_update[0], tx_bus.dcrdt_update_cnt[0:3], tx_bus.dcrdt_init[0], tx_bus.dcrdt_init_ack[0])
+        self.npd_sink = DataFlowControlSinkHandler(
+            clk, tx_bus.dcrdt_update[1], tx_bus.dcrdt_update_cnt[4:7], tx_bus.dcrdt_init[1], tx_bus.dcrdt_init_ack[1])
+        self.cpld_sink = DataFlowControlSinkHandler(
+            clk, tx_bus.dcrdt_update[2], tx_bus.dcrdt_update_cnt[8:11], tx_bus.dcrdt_init[2], tx_bus.dcrdt_init_ack[2])
+
+        self.ph_source = HeaderFlowControlSourceHandler(
+            clk, rx_bus.hcrdt_update[0], rx_bus.hcrdt_update_cnt[0:1], rx_bus.hcrdt_init[0], rx_bus.hcrdt_init_ack[0], self)
+        self.nph_source = HeaderFlowControlSourceHandler(
+            clk, rx_bus.hcrdt_update[1], rx_bus.hcrdt_update_cnt[2:3], rx_bus.hcrdt_init[1], rx_bus.hcrdt_init_ack[1], self)
+        self.cplh_source = HeaderFlowControlSourceHandler(
+            clk, rx_bus.hcrdt_update[2], rx_bus.hcrdt_update_cnt[4:5], rx_bus.hcrdt_init[2], rx_bus.hcrdt_init_ack[2], self)
+        self.pd_source = DataFlowControlSourceHandler(
+            clk, rx_bus.dcrdt_update[0], rx_bus.dcrdt_update_cnt[0:3], rx_bus.dcrdt_init[0], rx_bus.dcrdt_init_ack[0], self)
+        self.npd_source = DataFlowControlSourceHandler(
+            clk, rx_bus.dcrdt_update[1], rx_bus.dcrdt_update_cnt[4:7], rx_bus.dcrdt_init[1], rx_bus.dcrdt_init_ack[1], self)
+        self.cpld_source = DataFlowControlSourceHandler(
+            clk, rx_bus.dcrdt_update[2], rx_bus.dcrdt_update_cnt[8:11], rx_bus.dcrdt_init[2], rx_bus.dcrdt_init_ack[2], self)
+
+        self.source_credit_update_event = Event()
+
+    def source_credit_update_callback(self):
+        self.source_credit_update_event.set()
+
+    def rx_source_has_enough_credits(self, tlp):
+        data_credits_consumed = tlp.get_data_credits()
+        if tlp.is_posted():
+            if self.ph_source.get_available_val(
+            ) >= 1 and self.pd_source.get_available_val() >= data_credits_consumed:
+                return True
+
+        elif tlp.is_nonposted():
+            if self.nph_source.get_available_val(
+            ) >= 1 and self.npd_source.get_available_val() >= data_credits_consumed:
+                return True
+        elif tlp.is_completion():
+            if self.cplh_source.get_available_val(
+            ) >= 1 and self.cpld_source.get_available_val() >= data_credits_consumed:
+                return True
+        else:
+            raise Exception("should not reach here")
+
+        return False
+
+    async def wait_until_rx_source_has_enough_credits(self, tlp):
+        while not self.rx_source_has_enough_credits(tlp):
+            self.source_credit_update_event.clear()
+            await self.source_credit_update_event.wait()
+
+    def consume_rx_source_credits(self, tlp):
+        data_credits_consumed = tlp.get_data_credits()
+        if tlp.is_posted():
+            self.ph_source.consume_credit(1)
+            self.pd_source.consume_credit(data_credits_consumed)
+        elif tlp.is_nonposted():
+            self.nph_source.consume_credit(1)
+            self.npd_source.consume_credit(data_credits_consumed)
+        else:
+            self.cplh_source.consume_credit(1)
+            self.cpld_source.consume_credit(data_credits_consumed)
+
+    def release_tx_sink_credits(self, tlp):
+        data_credits_consumed = tlp.get_data_credits()
+        if tlp.is_posted():
+            self.ph_sink.release_credit(1)
+            self.pd_sink.release_credit(data_credits_consumed)
+        elif tlp.is_nonposted():
+            self.nph_sink.release_credit(1)
+            self.npd_sink.release_credit(data_credits_consumed)
+        else:
+            self.cplh_sink.release_credit(1)
+            self.cpld_sink.release_credit(data_credits_consumed)
+
+    async def run(self):
+        # first, wait for the RTile to communicate with PCIe link partener, and get the Credit from link partener
+        await self.fc_channel_state.initialized.wait()
+
+        self.ph_sink.set_init_value(
+            self.fc_channel_state.ph.rx_initial_allocation)
+        self.nph_sink.set_init_value(
+            self.fc_channel_state.nph.rx_initial_allocation)
+        self.cplh_sink.set_init_value(
+            self.fc_channel_state.cplh.rx_initial_allocation)
+        self.pd_sink.set_init_value(
+            self.fc_channel_state.pd.rx_initial_allocation)
+        self.npd_sink.set_init_value(
+            self.fc_channel_state.npd.rx_initial_allocation)
+        self.cpld_sink.set_init_value(
+            self.fc_channel_state.cpld.rx_initial_allocation)
+
+
+class DataFlowControlSourceHandler:
+    def __init__(self,
+                 clk,
+                 crdt_update,
+                 crdt_update_cnt,
+                 crdt_init,
+                 crdt_init_ack,
+                 parent_fc_handler
+                 ):
+
+        self.__dict__.setdefault('_base_field_size', 16)
+
+        self.clk = clk
+        self.crdt_update = crdt_update
+        self.crdt_update_cnt = crdt_update_cnt
+        self.crdt_init = crdt_init
+        self.crdt_init_ack = crdt_init_ack
+
+        self.crdt_init_ack.setimmediatevalue(0)
+
+        self.init_val = 0
+        self.available_val = 0
+
+        self.parent_fc_handler = parent_fc_handler
+
+        cocotb.start_soon(self._run())
+
+    def get_available_val(self):
+        return self.available_val
+
+    def consume_credit(self, credit):
+        if self.init_val != 0:
+            self.available_val -= credit
+            assert self.available_val >= 0
+
+    async def _run(self):
+        # init phase
+        await RisingEdge(self.crdt_init)
+        self.crdt_init_ack.value = 1
+        await RisingEdge(self.clk)
+        while True:
+            self.crdt_init_ack.value = 0
+            if self.crdt_update.value == 1:
+                self.init_val += self.crdt_update_cnt.value
+            if self.crdt_init.value == 0:
+                break
+            await RisingEdge(self.clk)
+
+        self.available_val = ((2**(self.tx_field_size-1)) -
+                              1) if self.init_val == 0 else self.init_val
+
+        # normal operate stste
+        while True:
+            if self.crdt_update.value == 1:
+                self.init_val += self.crdt_update_cnt.value
+                self.parent_fc_handler.source_credit_update_callback()
+            await RisingEdge(self.clk)
+
+
+class HeaderFlowControlSourceHandler:
+    def __init__(self, *args, **kwargs):
+        self._base_field_size = 12
+        super().__init__(*args, **kwargs)
+
+
+class DataFlowControlSinkHandler:
+    def __init__(self,
+                 clk,
+                 crdt_update,
+                 crdt_update_cnt,
+                 crdt_init,
+                 crdt_init_ack,
+                 fc_channel_state
+                 ):
+
+        self.__dict__.setdefault('_base_field_size', 16)
+
+        self.clk = clk
+        self.crdt_update = crdt_update
+        self.crdt_update_cnt = crdt_update_cnt
+        self.crdt_init = crdt_init
+        self.crdt_init_ack = crdt_init_ack
+
+        self.crdt_update.setimmediatevalue(0)
+        self.crdt_update_cnt.setimmediatevalue(0)
+        self.crdt_init.setimmediatevalue(0)
+
+        self.init_val = None
+        self.credit_to_release = None
+
+        self.fc_channel_state = fc_channel_state
+        self.initialized = Event()
+
+        cocotb.start_soon(self._run())
+
+    def set_init_value(self, value):
+        self.init_val = value
+        self.credit_to_release = value
+        self.initialized.set()
+
+    def release_credit(self, credit):
+        self.credit_to_release += credit
+
+    async def _run(self):
+        max_credit_release_per_beat = 2**(len(self.crdt_update_cnt)) - 1
+
+        # first, wait for the RTile to communicate with PCIe link partener, and get the Credit from link partener
+        await self.initialized.wait()
+
+        # init phase
+        self.crdt_init.value = 1
+        await RisingEdge(self.crdt_init_ack)
+        while True:
+            delta_val = min(self.credit_to_release,
+                            max_credit_release_per_beat)
+            self.crdt_update_cnt = delta_val
+            self.crdt_update.value = 1
+            self.credit_to_release -= delta_val
+            await RisingEdge(self.clk)
+            if self.credit_to_release == 0:
+                self.crdt_update.value = 0
+                break
+        # according to user guide, must wait 2 cycle before deassert init signal
+        await RisingEdge(self.crdt_init_ack)
+        await RisingEdge(self.crdt_init_ack)
+        self.crdt_init.value = 0
+        await RisingEdge(self.crdt_init_ack)
+
+        # normal operate stste
+        while True:
+            if self.credit_to_release.value != 0:
+                delta_val = min(self.credit_to_release,
+                                max_credit_release_per_beat)
+                self.crdt_update_cnt = delta_val
+                self.crdt_update.value = 1
+            else:
+                self.crdt_update.value = 0
+            self.credit_to_release -= delta_val
+            await RisingEdge(self.clk)
+
+
+class HeaderFlowControlSinkHandler:
+    def __init__(self, *args, **kwargs):
+        self._base_field_size = 12
+        super().__init__(*args, **kwargs)
