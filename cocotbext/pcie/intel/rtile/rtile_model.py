@@ -22,18 +22,18 @@ THE SOFTWARE.
 
 """
 
-import cocotb
-from cocotb.clock import Clock
-from cocotb.queue import Queue
-from cocotb.triggers import Event, RisingEdge, FallingEdge, Timer, First
-
-from cocotbext.pcie.core import Device, Endpoint, __version__
-from cocotbext.pcie.core.caps import MsiCapability, MsixCapability
-from cocotbext.pcie.core.caps import AerExtendedCapability, PcieExtendedCapability
-from cocotbext.pcie.core.utils import PcieId
-from cocotbext.pcie.core.tlp import Tlp, TlpType
-
 from .interface import RTilePcieFrame, RTilePcieSource, RTilePcieSink
+from cocotbext.pcie.core.dllp import FcType
+from cocotbext.pcie.core.tlp import Tlp, TlpType
+from cocotbext.pcie.core.utils import PcieId
+from cocotbext.pcie.core.caps import AerExtendedCapability, PcieExtendedCapability
+from cocotbext.pcie.core.caps import MsiCapability, MsixCapability
+from cocotbext.pcie.core import Device, Endpoint, __version__
+from cocotb.triggers import Event, RisingEdge, FallingEdge, Timer, First
+from cocotb.queue import Queue
+from cocotb.clock import Clock
+import cocotb
+import logging
 
 
 valid_configs = [
@@ -768,11 +768,14 @@ class RTilePcieDevice(Device):
 
         self.user_logic_side_fc_handler = FlowControlHandler(
             self.upstream_port.fc_state[0],
+            self.coreclkout_hip,
             tx_bus,
             rx_bus
         )
 
         # fork coroutines
+
+        cocotb.start_soon(self.user_logic_side_fc_handler.run())
 
         if self.coreclkout_hip is not None:
             cocotb.start_soon(Clock(self.coreclkout_hip, int(
@@ -1293,6 +1296,34 @@ class RTilePcieDevice(Device):
     # virtio_pcicfg_data
 
 
+class CocotbSignalView:
+    # note: signals[0] is the LSB in the view
+    def __init__(self, signals):
+        self.signals = signals
+
+    @property
+    def value(self):
+        val = 0
+        for signal in reversed(self.signals):
+            val = val << 1
+            val = val | signal.value
+        return val
+
+    @value.setter
+    def value(self, val):
+        for signal in self.signals:
+            signal.value = val & 0x01
+            val = val >> 1
+
+    def setimmediatevalue(self, val):
+        for signal in self.signals:
+            signal.setimmediatevalue(val & 0x01)
+            val = val >> 1
+
+    def __len__(self):
+        return len(self.signals)
+
+
 class FlowControlHandler:
     def __init__(self, fc_channel_state, clk, tx_bus, rx_bus):
         self.fc_channel_state = fc_channel_state
@@ -1300,30 +1331,30 @@ class FlowControlHandler:
         self.rx_bus = rx_bus
 
         self.ph_sink = HeaderFlowControlSinkHandler(
-            clk, tx_bus.hcrdt_update[0], tx_bus.hcrdt_update_cnt[0:1], tx_bus.hcrdt_init[0], tx_bus.hcrdt_init_ack[0])
+            clk, tx_bus.hcrdt_update[0], CocotbSignalView([tx_bus.hcrdt_update_cnt[0], tx_bus.hcrdt_update_cnt[1]]), tx_bus.hcrdt_init[0], tx_bus.hcrdt_init_ack[0], fc_channel_state, FcType.P)
         self.nph_sink = HeaderFlowControlSinkHandler(
-            clk, tx_bus.hcrdt_update[1], tx_bus.hcrdt_update_cnt[2:3], tx_bus.hcrdt_init[1], tx_bus.hcrdt_init_ack[1])
+            clk, tx_bus.hcrdt_update[1], CocotbSignalView([tx_bus.hcrdt_update_cnt[2], tx_bus.hcrdt_update_cnt[3]]), tx_bus.hcrdt_init[1], tx_bus.hcrdt_init_ack[1], fc_channel_state, FcType.NP)
         self.cplh_sink = HeaderFlowControlSinkHandler(
-            clk, tx_bus.hcrdt_update[2], tx_bus.hcrdt_update_cnt[4:5], tx_bus.hcrdt_init[2], tx_bus.hcrdt_init_ack[2])
+            clk, tx_bus.hcrdt_update[2], CocotbSignalView([tx_bus.hcrdt_update_cnt[4], tx_bus.hcrdt_update_cnt[5]]), tx_bus.hcrdt_init[2], tx_bus.hcrdt_init_ack[2], fc_channel_state, FcType.CPL)
         self.pd_sink = DataFlowControlSinkHandler(
-            clk, tx_bus.dcrdt_update[0], tx_bus.dcrdt_update_cnt[0:3], tx_bus.dcrdt_init[0], tx_bus.dcrdt_init_ack[0])
+            clk, tx_bus.dcrdt_update[0], CocotbSignalView([tx_bus.dcrdt_update_cnt[0], tx_bus.dcrdt_update_cnt[1], tx_bus.dcrdt_update_cnt[2], tx_bus.dcrdt_update_cnt[3]]), tx_bus.dcrdt_init[0], tx_bus.dcrdt_init_ack[0], fc_channel_state, FcType.P)
         self.npd_sink = DataFlowControlSinkHandler(
-            clk, tx_bus.dcrdt_update[1], tx_bus.dcrdt_update_cnt[4:7], tx_bus.dcrdt_init[1], tx_bus.dcrdt_init_ack[1])
+            clk, tx_bus.dcrdt_update[1], CocotbSignalView([tx_bus.dcrdt_update_cnt[4], tx_bus.dcrdt_update_cnt[5], tx_bus.dcrdt_update_cnt[6], tx_bus.dcrdt_update_cnt[7]]), tx_bus.dcrdt_init[1], tx_bus.dcrdt_init_ack[1], fc_channel_state, FcType.NP)
         self.cpld_sink = DataFlowControlSinkHandler(
-            clk, tx_bus.dcrdt_update[2], tx_bus.dcrdt_update_cnt[8:11], tx_bus.dcrdt_init[2], tx_bus.dcrdt_init_ack[2])
+            clk, tx_bus.dcrdt_update[2], CocotbSignalView([tx_bus.dcrdt_update_cnt[8], tx_bus.dcrdt_update_cnt[9], tx_bus.dcrdt_update_cnt[10], tx_bus.dcrdt_update_cnt[11]]), tx_bus.dcrdt_init[2], tx_bus.dcrdt_init_ack[2], fc_channel_state, FcType.CPL)
 
         self.ph_source = HeaderFlowControlSourceHandler(
-            clk, rx_bus.hcrdt_update[0], rx_bus.hcrdt_update_cnt[0:1], rx_bus.hcrdt_init[0], rx_bus.hcrdt_init_ack[0], self)
+            clk, rx_bus.hcrdt_update[0], CocotbSignalView([rx_bus.hcrdt_update_cnt[0], rx_bus.hcrdt_update_cnt[1]]), rx_bus.hcrdt_init[0], rx_bus.hcrdt_init_ack[0], self, FcType.P)
         self.nph_source = HeaderFlowControlSourceHandler(
-            clk, rx_bus.hcrdt_update[1], rx_bus.hcrdt_update_cnt[2:3], rx_bus.hcrdt_init[1], rx_bus.hcrdt_init_ack[1], self)
+            clk, rx_bus.hcrdt_update[1], CocotbSignalView([rx_bus.hcrdt_update_cnt[2], rx_bus.hcrdt_update_cnt[3]]), rx_bus.hcrdt_init[1], rx_bus.hcrdt_init_ack[1], self, FcType.NP)
         self.cplh_source = HeaderFlowControlSourceHandler(
-            clk, rx_bus.hcrdt_update[2], rx_bus.hcrdt_update_cnt[4:5], rx_bus.hcrdt_init[2], rx_bus.hcrdt_init_ack[2], self)
+            clk, rx_bus.hcrdt_update[2], CocotbSignalView([rx_bus.hcrdt_update_cnt[4], rx_bus.hcrdt_update_cnt[5]]), rx_bus.hcrdt_init[2], rx_bus.hcrdt_init_ack[2], self, FcType.CPL)
         self.pd_source = DataFlowControlSourceHandler(
-            clk, rx_bus.dcrdt_update[0], rx_bus.dcrdt_update_cnt[0:3], rx_bus.dcrdt_init[0], rx_bus.dcrdt_init_ack[0], self)
+            clk, rx_bus.dcrdt_update[0], CocotbSignalView([rx_bus.dcrdt_update_cnt[0], rx_bus.dcrdt_update_cnt[1], rx_bus.dcrdt_update_cnt[2], rx_bus.dcrdt_update_cnt[3]]), rx_bus.dcrdt_init[0], rx_bus.dcrdt_init_ack[0], self, FcType.P)
         self.npd_source = DataFlowControlSourceHandler(
-            clk, rx_bus.dcrdt_update[1], rx_bus.dcrdt_update_cnt[4:7], rx_bus.dcrdt_init[1], rx_bus.dcrdt_init_ack[1], self)
+            clk, rx_bus.dcrdt_update[1], CocotbSignalView([rx_bus.dcrdt_update_cnt[4], rx_bus.dcrdt_update_cnt[5], rx_bus.dcrdt_update_cnt[6], rx_bus.dcrdt_update_cnt[7]]), rx_bus.dcrdt_init[1], rx_bus.dcrdt_init_ack[1], self, FcType.NP)
         self.cpld_source = DataFlowControlSourceHandler(
-            clk, rx_bus.dcrdt_update[2], rx_bus.dcrdt_update_cnt[8:11], rx_bus.dcrdt_init[2], rx_bus.dcrdt_init_ack[2], self)
+            clk, rx_bus.dcrdt_update[2], CocotbSignalView([rx_bus.dcrdt_update_cnt[8], rx_bus.dcrdt_update_cnt[9], rx_bus.dcrdt_update_cnt[10], rx_bus.dcrdt_update_cnt[11]]), rx_bus.dcrdt_init[2], rx_bus.dcrdt_init_ack[2], self, FcType.CPL)
 
         self.source_credit_update_event = Event()
 
@@ -1404,10 +1435,16 @@ class DataFlowControlSourceHandler:
                  crdt_update_cnt,
                  crdt_init,
                  crdt_init_ack,
-                 parent_fc_handler
+                 parent_fc_handler,
+                 fc_type
                  ):
 
         self.__dict__.setdefault('_base_field_size', 16)
+
+        self.log = logging.getLogger(
+            f"cocotb.pcie.{type(self).__name__}.{id(self)}")
+        self.log.name = f"cocotb.pcie.{type(self).__name__}[{fc_type}]"
+        self.log.setLevel(logging.DEBUG)
 
         self.clk = clk
         self.crdt_update = crdt_update
@@ -1421,6 +1458,7 @@ class DataFlowControlSourceHandler:
         self.available_val = 0
 
         self.parent_fc_handler = parent_fc_handler
+        self.fc_type = fc_type
 
         cocotb.start_soon(self._run())
 
@@ -1434,7 +1472,13 @@ class DataFlowControlSourceHandler:
 
     async def _run(self):
         # init phase
-        await RisingEdge(self.crdt_init)
+        while True:
+            if (self.crdt_init.value == 1):
+                break
+            await RisingEdge(self.clk)
+
+        self.log.debug("got init request")
+
         self.crdt_init_ack.value = 1
         await RisingEdge(self.clk)
         while True:
@@ -1445,8 +1489,11 @@ class DataFlowControlSourceHandler:
                 break
             await RisingEdge(self.clk)
 
-        self.available_val = ((2**(self.tx_field_size-1)) -
+        self.available_val = ((2**(self._base_field_size-1)) -
                               1) if self.init_val == 0 else self.init_val
+
+        self.log.debug(
+            f"init finished. credit advertised by user logic is: {self.init_val}")
 
         # normal operate stste
         while True:
@@ -1456,7 +1503,7 @@ class DataFlowControlSourceHandler:
             await RisingEdge(self.clk)
 
 
-class HeaderFlowControlSourceHandler:
+class HeaderFlowControlSourceHandler(DataFlowControlSourceHandler):
     def __init__(self, *args, **kwargs):
         self._base_field_size = 12
         super().__init__(*args, **kwargs)
@@ -1469,10 +1516,16 @@ class DataFlowControlSinkHandler:
                  crdt_update_cnt,
                  crdt_init,
                  crdt_init_ack,
-                 fc_channel_state
+                 fc_channel_state,
+                 fc_type
                  ):
 
         self.__dict__.setdefault('_base_field_size', 16)
+
+        self.log = logging.getLogger(
+            f"cocotb.pcie.{type(self).__name__}.{id(self)}")
+        self.log.name = f"cocotb.pcie.{type(self).__name__}[{fc_type}]"
+        self.log.setLevel(logging.DEBUG)
 
         self.clk = clk
         self.crdt_update = crdt_update
@@ -1488,6 +1541,8 @@ class DataFlowControlSinkHandler:
         self.credit_to_release = None
 
         self.fc_channel_state = fc_channel_state
+        self.fc_type = fc_type
+
         self.initialized = Event()
 
         cocotb.start_soon(self._run())
@@ -1505,10 +1560,16 @@ class DataFlowControlSinkHandler:
 
         # first, wait for the RTile to communicate with PCIe link partener, and get the Credit from link partener
         await self.initialized.wait()
+        self.log.debug(
+            f"get credit from pcie link partener done. credit advertised by link partener is: {self.init_val}")
 
         # init phase
         self.crdt_init.value = 1
-        await RisingEdge(self.crdt_init_ack)
+        while True:
+            if self.crdt_init_ack.value == 1:
+                break
+            await RisingEdge(self.clk)
+
         while True:
             delta_val = min(self.credit_to_release,
                             max_credit_release_per_beat)
@@ -1520,14 +1581,16 @@ class DataFlowControlSinkHandler:
                 self.crdt_update.value = 0
                 break
         # according to user guide, must wait 2 cycle before deassert init signal
-        await RisingEdge(self.crdt_init_ack)
-        await RisingEdge(self.crdt_init_ack)
+        await RisingEdge(self.clk)
+        await RisingEdge(self.clk)
         self.crdt_init.value = 0
-        await RisingEdge(self.crdt_init_ack)
+        await RisingEdge(self.clk)
+
+        self.log.debug("init credit with user logic finished")
 
         # normal operate stste
         while True:
-            if self.credit_to_release.value != 0:
+            if self.credit_to_release != 0:
                 delta_val = min(self.credit_to_release,
                                 max_credit_release_per_beat)
                 self.crdt_update_cnt = delta_val
@@ -1538,7 +1601,7 @@ class DataFlowControlSinkHandler:
             await RisingEdge(self.clk)
 
 
-class HeaderFlowControlSinkHandler:
+class HeaderFlowControlSinkHandler(DataFlowControlSinkHandler):
     def __init__(self, *args, **kwargs):
         self._base_field_size = 12
         super().__init__(*args, **kwargs)
