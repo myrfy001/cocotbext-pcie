@@ -1330,30 +1330,30 @@ class FlowControlHandler:
         self.tx_bus = tx_bus
         self.rx_bus = rx_bus
 
-        self.ph_sink = HeaderFlowControlSinkHandler(
+        self.ph_sink = FlowControlSinkHandlerForHeader(
             clk, tx_bus.hcrdt_update[0], CocotbSignalView([tx_bus.hcrdt_update_cnt[0], tx_bus.hcrdt_update_cnt[1]]), tx_bus.hcrdt_init[0], tx_bus.hcrdt_init_ack[0], fc_channel_state, FcType.P)
-        self.nph_sink = HeaderFlowControlSinkHandler(
+        self.nph_sink = FlowControlSinkHandlerForHeader(
             clk, tx_bus.hcrdt_update[1], CocotbSignalView([tx_bus.hcrdt_update_cnt[2], tx_bus.hcrdt_update_cnt[3]]), tx_bus.hcrdt_init[1], tx_bus.hcrdt_init_ack[1], fc_channel_state, FcType.NP)
-        self.cplh_sink = HeaderFlowControlSinkHandler(
+        self.cplh_sink = FlowControlSinkHandlerForHeader(
             clk, tx_bus.hcrdt_update[2], CocotbSignalView([tx_bus.hcrdt_update_cnt[4], tx_bus.hcrdt_update_cnt[5]]), tx_bus.hcrdt_init[2], tx_bus.hcrdt_init_ack[2], fc_channel_state, FcType.CPL)
-        self.pd_sink = DataFlowControlSinkHandler(
+        self.pd_sink = FlowControlSinkHandlerForData(
             clk, tx_bus.dcrdt_update[0], CocotbSignalView([tx_bus.dcrdt_update_cnt[0], tx_bus.dcrdt_update_cnt[1], tx_bus.dcrdt_update_cnt[2], tx_bus.dcrdt_update_cnt[3]]), tx_bus.dcrdt_init[0], tx_bus.dcrdt_init_ack[0], fc_channel_state, FcType.P)
-        self.npd_sink = DataFlowControlSinkHandler(
+        self.npd_sink = FlowControlSinkHandlerForData(
             clk, tx_bus.dcrdt_update[1], CocotbSignalView([tx_bus.dcrdt_update_cnt[4], tx_bus.dcrdt_update_cnt[5], tx_bus.dcrdt_update_cnt[6], tx_bus.dcrdt_update_cnt[7]]), tx_bus.dcrdt_init[1], tx_bus.dcrdt_init_ack[1], fc_channel_state, FcType.NP)
-        self.cpld_sink = DataFlowControlSinkHandler(
+        self.cpld_sink = FlowControlSinkHandlerForData(
             clk, tx_bus.dcrdt_update[2], CocotbSignalView([tx_bus.dcrdt_update_cnt[8], tx_bus.dcrdt_update_cnt[9], tx_bus.dcrdt_update_cnt[10], tx_bus.dcrdt_update_cnt[11]]), tx_bus.dcrdt_init[2], tx_bus.dcrdt_init_ack[2], fc_channel_state, FcType.CPL)
 
-        self.ph_source = HeaderFlowControlSourceHandler(
+        self.ph_source = FlowControlSourceHandlerForHeader(
             clk, rx_bus.hcrdt_update[0], CocotbSignalView([rx_bus.hcrdt_update_cnt[0], rx_bus.hcrdt_update_cnt[1]]), rx_bus.hcrdt_init[0], rx_bus.hcrdt_init_ack[0], self, FcType.P)
-        self.nph_source = HeaderFlowControlSourceHandler(
+        self.nph_source = FlowControlSourceHandlerForHeader(
             clk, rx_bus.hcrdt_update[1], CocotbSignalView([rx_bus.hcrdt_update_cnt[2], rx_bus.hcrdt_update_cnt[3]]), rx_bus.hcrdt_init[1], rx_bus.hcrdt_init_ack[1], self, FcType.NP)
-        self.cplh_source = HeaderFlowControlSourceHandler(
+        self.cplh_source = FlowControlSourceHandlerForHeader(
             clk, rx_bus.hcrdt_update[2], CocotbSignalView([rx_bus.hcrdt_update_cnt[4], rx_bus.hcrdt_update_cnt[5]]), rx_bus.hcrdt_init[2], rx_bus.hcrdt_init_ack[2], self, FcType.CPL)
-        self.pd_source = DataFlowControlSourceHandler(
+        self.pd_source = FlowControlSourceHandlerForData(
             clk, rx_bus.dcrdt_update[0], CocotbSignalView([rx_bus.dcrdt_update_cnt[0], rx_bus.dcrdt_update_cnt[1], rx_bus.dcrdt_update_cnt[2], rx_bus.dcrdt_update_cnt[3]]), rx_bus.dcrdt_init[0], rx_bus.dcrdt_init_ack[0], self, FcType.P)
-        self.npd_source = DataFlowControlSourceHandler(
+        self.npd_source = FlowControlSourceHandlerForData(
             clk, rx_bus.dcrdt_update[1], CocotbSignalView([rx_bus.dcrdt_update_cnt[4], rx_bus.dcrdt_update_cnt[5], rx_bus.dcrdt_update_cnt[6], rx_bus.dcrdt_update_cnt[7]]), rx_bus.dcrdt_init[1], rx_bus.dcrdt_init_ack[1], self, FcType.NP)
-        self.cpld_source = DataFlowControlSourceHandler(
+        self.cpld_source = FlowControlSourceHandlerForData(
             clk, rx_bus.dcrdt_update[2], CocotbSignalView([rx_bus.dcrdt_update_cnt[8], rx_bus.dcrdt_update_cnt[9], rx_bus.dcrdt_update_cnt[10], rx_bus.dcrdt_update_cnt[11]]), rx_bus.dcrdt_init[2], rx_bus.dcrdt_init_ack[2], self, FcType.CPL)
 
         self.source_credit_update_event = Event()
@@ -1428,7 +1428,7 @@ class FlowControlHandler:
             self.fc_channel_state.cpld.rx_initial_allocation)
 
 
-class DataFlowControlSourceHandler:
+class FlowControlSourceHandlerForData:
     def __init__(self,
                  clk,
                  crdt_update,
@@ -1503,13 +1503,13 @@ class DataFlowControlSourceHandler:
             await RisingEdge(self.clk)
 
 
-class HeaderFlowControlSourceHandler(DataFlowControlSourceHandler):
+class FlowControlSourceHandlerForHeader(FlowControlSourceHandlerForData):
     def __init__(self, *args, **kwargs):
         self._base_field_size = 12
         super().__init__(*args, **kwargs)
 
 
-class DataFlowControlSinkHandler:
+class FlowControlSinkHandlerForData:
     def __init__(self,
                  clk,
                  crdt_update,
@@ -1573,9 +1573,10 @@ class DataFlowControlSinkHandler:
         while True:
             delta_val = min(self.credit_to_release,
                             max_credit_release_per_beat)
-            self.crdt_update_cnt = delta_val
+            self.crdt_update_cnt.value = delta_val
             self.crdt_update.value = 1
             self.credit_to_release -= delta_val
+            self.log.debug(f"send credit update, val={delta_val}")
             await RisingEdge(self.clk)
             if self.credit_to_release == 0:
                 self.crdt_update.value = 0
@@ -1593,15 +1594,18 @@ class DataFlowControlSinkHandler:
             if self.credit_to_release != 0:
                 delta_val = min(self.credit_to_release,
                                 max_credit_release_per_beat)
-                self.crdt_update_cnt = delta_val
+                self.crdt_update_cnt.value = delta_val
                 self.crdt_update.value = 1
+                self.credit_to_release -= delta_val
+                self.log.debug(
+                    f"send credit update in normal operation mode, val={delta_val}")
             else:
                 self.crdt_update.value = 0
-            self.credit_to_release -= delta_val
+
             await RisingEdge(self.clk)
 
 
-class HeaderFlowControlSinkHandler(DataFlowControlSinkHandler):
+class FlowControlSinkHandlerForHeader(FlowControlSinkHandlerForData):
     def __init__(self, *args, **kwargs):
         self._base_field_size = 12
         super().__init__(*args, **kwargs)
