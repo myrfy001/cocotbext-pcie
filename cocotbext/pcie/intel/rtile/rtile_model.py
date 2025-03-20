@@ -1326,6 +1326,12 @@ class CocotbSignalView:
 
 class FlowControlHandler:
     def __init__(self, fc_channel_state, clk, tx_bus, rx_bus):
+
+        self.log = logging.getLogger(
+            f"cocotb.pcie.{type(self).__name__}.{id(self)}")
+        self.log.name = f"cocotb.pcie.{type(self).__name__}"
+        self.log.setLevel(logging.DEBUG)
+
         self.fc_channel_state = fc_channel_state
         self.tx_bus = tx_bus
         self.rx_bus = rx_bus
@@ -1384,6 +1390,8 @@ class FlowControlHandler:
     async def wait_until_rx_source_has_enough_credits(self, tlp):
         while not self.rx_source_has_enough_credits(tlp):
             self.source_credit_update_event.clear()
+            self.log.debug(
+                "user logic side has no enough credit to store received TLP")
             await self.source_credit_update_event.wait()
 
     def consume_rx_source_credits(self, tlp):
